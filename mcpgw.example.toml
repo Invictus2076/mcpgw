@@ -1,0 +1,57 @@
+# mcpgw example config. Copy to mcpgw.toml and trim to the servers you use.
+# Any string can reference environment variables: ${VAR} or ${VAR:-default}.
+
+[gateway]
+host = "127.0.0.1"              # keep it on loopback unless you set api_key
+port = 8765
+# public_url = "http://localhost:8765"   # used for OAuth redirects and connect links
+# api_key = "${MCPGW_API_KEY}"           # require "Authorization: Bearer <key>" on /mcp and /api
+# state_dir = "~/.mcpgw"                 # credentials.json (0600) + secret.key
+# separator = "__"                       # tool names become <server>__<tool>
+# plugins = ["my_company.mcpgw_providers"]
+# client_metadata_url = "https://gw.example.com/oauth/client-metadata.json"  # enables CIMD
+# auth_wait_seconds = 90                 # how long a retried call waits for browser sign-in
+
+# --- Built-in providers ----------------------------------------------------
+
+[servers.notion]
+provider = "notion"
+
+[servers.linear]
+provider = "linear"
+# readonly = true                        # uses https://mcp.linear.app/mcp/readonly
+
+[servers.sentry]
+provider = "sentry"
+# org = "my-org"                         # scope to an org ...
+# project = "web"                        # ... or a project
+
+[servers.atlassian]
+provider = "atlassian"                   # Rovo MCP v2; flat_tools = true by default
+
+[servers.stripe]
+provider = "stripe"
+
+# GitHub has no dynamic client registration: create an OAuth App at
+# https://github.com/settings/developers with callback http://localhost:8765/oauth/callback
+[servers.github]
+provider = "github"
+client_id = "${GITHUB_CLIENT_ID}"
+client_secret = "${GITHUB_CLIENT_SECRET}"
+toolsets = ["repos", "issues", "pull_requests"]
+# readonly = true
+# or skip OAuth and use a personal access token:
+# auth = "bearer"
+# token = "${GITHUB_PAT}"
+
+# --- Any spec-compliant server ---------------------------------------------
+
+# [servers.internal]
+# url = "https://mcp.internal.example.com/mcp"
+# auth = "oauth"                         # oauth (default) | bearer | none
+# scopes = ["tools:read"]                # override scope selection
+# headers = { "X-Team" = "platform" }
+# protocol = "auto"                      # auto | modern (2026-07-28) | legacy (2025-11-25)
+# timeout = 60
+# tools.allow = ["search_*", "get_*"]
+# tools.deny = ["delete_*"]
