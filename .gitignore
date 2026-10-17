@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+# local config and credentials: never commit these
+mcpgw.toml
+.mcpgw/
+credentials.json
+secret.key

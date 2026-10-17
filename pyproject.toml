@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcpgw"
+version = "0.1.0"
+description = "Lightweight, pluggable gateway for Streamable HTTP MCP servers with built-in OAuth 2.1"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["aiohttp>=3.9"]
+
+[project.scripts]
+mcpgw = "mcpgw.__main__:main"
+
+# Third-party provider plugins register here:
+#   [project.entry-points."mcpgw.providers"]
+#   acme = "acme_mcpgw:AcmeProvider"
+
+[tool.setuptools.packages.find]
+include = ["mcpgw*"]
