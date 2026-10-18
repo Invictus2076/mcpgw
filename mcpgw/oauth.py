@@ -28,6 +28,7 @@ import aiohttp
 from . import __version__
 from .config import ConfigError, GatewayConfig, is_loopback_host, require_secure_url
 from .store import TokenStore
+from .util import read_body
 
 if TYPE_CHECKING:  # pragma: no cover
     from .upstream import Upstream
@@ -294,9 +295,7 @@ class AuthManager:
                                      timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as r:
                 if r.status != 200:
                     return None
-                raw = await r.content.read(MAX_METADATA_BYTES + 1)
-                if len(raw) > MAX_METADATA_BYTES:
-                    raise OAuthError(f"{what} too large")
+                raw = await read_body(r, MAX_METADATA_BYTES)  # ValueError if too large
                 data = json.loads(raw)
                 return data if isinstance(data, dict) else None
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:

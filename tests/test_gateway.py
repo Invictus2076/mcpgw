@@ -290,6 +290,15 @@ class ModernFlowTests(unittest.IsolatedAsyncioTestCase):
                 "requestState": r["requestState"]}, caps)
             self.assertEqual(text(body["result"]), "Hello Ada")
 
+    async def test_large_multi_chunk_response(self):
+        # Regression: Notion's ~260 KB tools/list arrived in several chunks and was truncated.
+        async with Harness({"mock": MockProvider(big_tools=200)}) as h:
+            await h.connect()
+            _, body = await h.modern("tools/list", {})
+            names = tool_names(body)
+            self.assertIn("mock__pad_199", names)
+            self.assertIn("mock__echo", names)
+
     async def test_scoped_endpoint(self):
         async with Harness({"mock": MockProvider()}) as h:
             _, body = await h.modern("tools/list", {}, path="/mcp/mock")

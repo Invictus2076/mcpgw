@@ -22,6 +22,7 @@ from .protocol import (
     param_header_values,
 )
 from .providers import Provider
+from .util import read_body
 
 log = logging.getLogger("mcpgw.upstream")
 
@@ -108,9 +109,10 @@ class Upstream:
                     return 202, r.headers, None
                 if ctype == "text/event-stream" and r.status == 200:
                     return r.status, r.headers, await self._read_sse(r, msg.get("id"), headers)
-                raw = await r.content.read(MAX_MESSAGE_BYTES + 1)
-                if len(raw) > MAX_MESSAGE_BYTES:
-                    raise UpstreamError("response too large")
+                try:
+                    raw = await read_body(r, MAX_MESSAGE_BYTES)
+                except ValueError as e:
+                    raise UpstreamError(f"{self.name}: response too large") from e
                 body = None
                 if raw.strip():
                     try:
