@@ -70,6 +70,7 @@ class MockProvider:
     cimd_client_id: str | None = None
     base_scopes: list[str] = field(default_factory=lambda: ["read"])
     write_scope: str = "write"
+    big_tools: int = 0  # extra padded tools, to force multi-chunk responses
 
     def __post_init__(self) -> None:
         self.clients: dict[str, dict] = {}
@@ -348,7 +349,8 @@ class MockProvider:
                                   "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mock", "version": "1"}},
                                   "ttlMs": 60000, "cacheScope": "private"})
         if method == "tools/list":
-            return self._ok(rid, {"resultType": "complete", "tools": TOOLS, "ttlMs": 60000, "cacheScope": "private"})
+            return self._ok(rid, {"resultType": "complete", "tools": TOOLS + self._padding(),
+                                  "ttlMs": 60000, "cacheScope": "private"})
         if method == "tools/call":
             if params.get("name") == "region_query":
                 region = (params.get("arguments") or {}).get("region")
@@ -419,6 +421,10 @@ class MockProvider:
             result["resultType"] = "complete"
             return self._ok(rid, result)
         return await self._reply(request, rid, result)
+
+    def _padding(self) -> list[dict]:
+        return [{"name": f"pad_{i}", "description": "x" * 2000, "inputSchema": {"type": "object"}}
+                for i in range(self.big_tools)]
 
     def _ok(self, rid, result) -> web.Response:
         return web.json_response({"jsonrpc": "2.0", "id": rid, "result": result})

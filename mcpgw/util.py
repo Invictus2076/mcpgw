@@ -8,6 +8,21 @@ import secrets
 import time
 from typing import Any
 
+import aiohttp
+
+
+async def read_body(resp: aiohttp.ClientResponse, limit: int) -> bytes:
+    """Read the whole response body, refusing anything over ``limit`` bytes.
+
+    (``StreamReader.read(n)`` returns only what is already buffered, so a single
+    call silently truncates bodies that arrive in several chunks.)
+    """
+    buf = bytearray()
+    async for chunk in resp.content.iter_chunked(65536):
+        buf += chunk
+        if len(buf) > limit:
+            raise ValueError("response too large")
+    return bytes(buf)
 
 
 def b64url(data: bytes) -> str:
