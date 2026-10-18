@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-18
+
+### Fixed
+- Large upstream responses were truncated. Bodies were read with a single
+  `StreamReader.read(n)`, which returns only what is already buffered, so
+  replies arriving in several chunks failed to parse. This broke Notion's
+  ~260 KB `tools/list`. Responses and OAuth metadata are now read in full,
+  with size limits (`util.read_body`).
+
+### Added
+- Regression test with a ~400 KB `tools/list` (`MockProvider(big_tools=N)`);
+  41 tests.
+- `docs/live-testing.md`: verification results against the live Notion,
+  Linear, Sentry, Atlassian, Stripe and GitHub servers, plus a guide to
+  repeating them.
+
+### Changed
+- README recommends explicit `scopes` for Atlassian and Sentry, which request
+  every advertised scope by default.
+
 ## [0.1.0] - 2026-10-18
 
 First release.
