@@ -15,7 +15,7 @@ A lightweight, pluggable gateway for **Streamable HTTP MCP servers**. It does th
 - **OAuth 2.1 per the MCP authorization spec**: PRM discovery (RFC 9728), issuer-validated AS metadata (RFC 8414 / OIDC), client registration in spec priority order (pre-registered ▸ CIMD ▸ DCR), PKCE S256, `resource` indicators (RFC 8707), `iss` validation (RFC 9207), refresh with rotation, and step-up on `insufficient_scope`.
 - **Pluggable**: providers are small classes; token storage is an interface.
 
-Design details: [docs/architecture.md](docs/architecture.md) · History: [CHANGELOG.md](CHANGELOG.md)
+Design details: [docs/architecture.md](docs/architecture.md) · Live provider results: [docs/live-testing.md](docs/live-testing.md) · History: [CHANGELOG.md](CHANGELOG.md)
 
 ## Quick start
 
@@ -58,7 +58,7 @@ The first call to an unconnected server prompts the user in whichever way the cl
 | `stripe` | `mcp.stripe.com` | OAuth; or `auth = "bearer"` with a restricted key. |
 | `generic` | `url = "..."` | Anything that follows the MCP spec. |
 
-Endpoints were checked in October 2026; providers move things, and `url = ...` always overrides a preset.
+Endpoints were checked in October 2026, and discovery was verified live against all six (see [docs/live-testing.md](docs/live-testing.md)). Providers move things, and `url = ...` always overrides a preset. If you want least privilege, set `scopes` for Atlassian and Sentry: by default they request every scope they advertise.
 
 ## Endpoints
 
@@ -125,7 +125,7 @@ Tools only: there's no resources or prompts aggregation, and no `subscriptions/l
 python -m unittest discover -s tests -v
 ```
 
-40 tests run real HTTP between a downstream client, the gateway, and a **strict mock provider**. The mock rejects missing PKCE, a wrong `resource`, unregistered redirects, header/body mismatches, missing sessions, and replayed refresh tokens. Covered paths:
+41 tests run real HTTP between a downstream client, the gateway, and a **strict mock provider**. The mock rejects missing PKCE, a wrong `resource`, unregistered redirects, header/body mismatches, missing sessions, and replayed refresh tokens. Covered paths:
 
 - modern/legacy/dual-era upstreams, and modern/legacy downstreams
 - DCR, CIMD and pre-registered (`client_secret_basic`) clients
