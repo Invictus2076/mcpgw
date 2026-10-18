@@ -49,7 +49,7 @@ Modern requests always carry `Mcp-Method`. Requests for `tools/call`, `prompts/g
 
 Tool definitions with invalid `x-mcp-header` annotations are dropped, as the spec requires. That covers annotations on non-primitive types, duplicates (case-insensitive), names that aren't field-name tokens, and annotations not reachable through a chain of `properties` keys.
 
-Responses may be JSON or SSE. The SSE reader handles CRLF, comments, multi-line `data:` fields and events split across chunks. It caps message size, ignores progress notifications, and answers a legacy server's `ping` requests on the stream. The gateway declares no client capabilities to legacy servers, so `ping` is the only request a compliant server can send.
+Responses may be JSON or SSE. JSON bodies are read in full in chunks, up to a size limit (`util.read_body`). The SSE reader handles CRLF, comments, multi-line `data:` fields and events split across chunks. It caps message size, ignores progress notifications, and answers a legacy server's `ping` requests on the stream. The gateway declares no client capabilities to legacy servers, so `ping` is the only request a compliant server can send.
 
 ### Downstream: serving both kinds of client
 
