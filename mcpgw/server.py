@@ -242,7 +242,7 @@ async def handle_mcp_other(request: web.Request) -> web.Response:
 
 _PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="same-origin">
 <style>
 :root{{--bg:#f6f5f2;--fg:#1d1d1b;--muted:#6b6a65;--card:#fff;--line:#e3e1db;--accent:#2f5d50}}
 @media (prefers-color-scheme:dark){{:root{{--bg:#151514;--fg:#ecebe7;--muted:#a3a19a;--card:#1f1f1d;--line:#33322f;--accent:#7fb8a6}}}}
@@ -256,9 +256,14 @@ background:var(--accent);color:var(--card);cursor:pointer}}
 
 
 def _page(title: str, body: str, status: int = 200) -> web.Response:
+    # Referrer policy must be "same-origin", not "no-referrer": under no-referrer,
+    # browsers send ``Origin: null`` on the form POST and the Origin check below
+    # rejects it. same-origin still keeps the ticket out of the Referer header
+    # when we redirect to the provider.
     return web.Response(text=_PAGE.format(title=html.escape(title), body=body), status=status,
                         content_type="text/html",
                         headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY",
+                                 "Referrer-Policy": "same-origin",
                                  "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"})
 
 
@@ -294,6 +299,10 @@ async def handle_connect_start(request: web.Request) -> web.Response:
         url = await gw.begin_connect(server, bool(payload.get("u")))
     except OAuthError as e:
         return _page("Can't connect", f"<p>{html.escape(str(e))}</p>", 502)
+    except Exception:  # never show a bare 500 in the middle of a sign-in
+        log.exception("%s: starting authorization failed", server)
+        return _page("Can't connect", "<p>The gateway hit an unexpected error starting the sign-in. "
+                     "Check its log for details.</p>", 500)
     raise web.HTTPFound(url)
 
 
@@ -364,8 +373,9 @@ async def api_call(request: web.Request) -> web.Response:
         return web.json_response({"error": "connect_required", "server": e.server,
                                   "message": e.message, "connect_url": e.url}, status=409)
     except RpcError as e:
+        not_found = e.code == -32602 and e.message.startswith("Unknown tool")
         return web.json_response({"error": e.message, "code": e.code, "data": e.data},
-                                 status=404 if e.code == -32602 else 400)
+                                 status=404 if not_found else 400)
     return web.json_response({"result": result})
 
 

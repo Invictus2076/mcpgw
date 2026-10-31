@@ -285,7 +285,10 @@ class AuthManager:
         if urlsplit(url).scheme == "https":
             return
         if self._local_dev(up):
-            require_secure_url(url, what)
+            try:
+                require_secure_url(url, what)
+            except ConfigError as e:
+                raise OAuthError(str(e)) from e
             return
         raise OAuthError(f"{what} must use https: {url}")
 
@@ -494,24 +497,33 @@ class AuthManager:
             }
             if scopes:
                 body["scope"] = " ".join(scopes)
-            async with self.http.post(endpoint, json=body, headers={"Accept": "application/json"},
-                                      timeout=aiohttp.ClientTimeout(total=20), allow_redirects=False) as r:
-                text = await r.text()
-                if r.status in (200, 201):
-                    data = await r.json(content_type=None)
-                    if not data.get("client_id"):
-                        raise OAuthError("registration response has no client_id")
-                    method = data.get("token_endpoint_auth_method") or (
-                        "client_secret_basic" if data.get("client_secret") else "none")
-                    rec = {"client_id": data["client_id"], "client_secret": data.get("client_secret"),
-                           "client_secret_expires_at": data.get("client_secret_expires_at") or 0,
-                           "method": method, "source": "dcr", "issuer": issuer,
-                           "registered_at": int(time.time())}
-                    await self.store.put(key, rec)
-                    log.info("registered OAuth client with %s (%s)", issuer, app_type)
-                    return rec
-                last = f"HTTP {r.status}: {text[:300]}"
-                log.warning("dynamic client registration (%s) failed: %s", app_type, last)
+            try:
+                async with self.http.post(endpoint, json=body, headers={"Accept": "application/json"},
+                                          timeout=aiohttp.ClientTimeout(total=20), allow_redirects=False) as r:
+                    status = r.status
+                    text = await r.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise OAuthError(f"registration endpoint unreachable: {e}") from e
+            if status in (200, 201):
+                try:
+                    data = json.loads(text)
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict):
+                    raise OAuthError("registration response is not a JSON object")
+                if not data.get("client_id"):
+                    raise OAuthError("registration response has no client_id")
+                method = data.get("token_endpoint_auth_method") or (
+                    "client_secret_basic" if data.get("client_secret") else "none")
+                rec = {"client_id": data["client_id"], "client_secret": data.get("client_secret"),
+                       "client_secret_expires_at": data.get("client_secret_expires_at") or 0,
+                       "method": method, "source": "dcr", "issuer": issuer,
+                       "registered_at": int(time.time())}
+                await self.store.put(key, rec)
+                log.info("registered OAuth client with %s (%s)", issuer, app_type)
+                return rec
+            last = f"HTTP {status}: {text[:300]}"
+            log.warning("dynamic client registration (%s) failed: %s", app_type, last)
         raise OAuthError(f"dynamic client registration failed ({last})")
 
     def cimd_document(self) -> dict:
@@ -665,7 +677,7 @@ class AuthManager:
         rec = {
             "access_token": data["access_token"],
             "refresh_token": data.get("refresh_token") or prev.get("refresh_token"),
-            "expires_at": int(time.time() + int(data["expires_in"])) if data.get("expires_in") else None,
+            "expires_at": _expires_at(data.get("expires_in")),
             "scopes": scopes,
             "issuer": pending.issuer if pending else prev.get("issuer"),
             "resource": pending.resource if pending else prev.get("resource"),
@@ -725,6 +737,19 @@ class TokenError(OAuthError):
     def __init__(self, error: str, description: str):
         super().__init__(f"{error}: {description}")
         self.error = error
+
+
+def _expires_at(expires_in) -> int | None:
+    """Absolute expiry from ``expires_in``. Some servers send it as a string,
+    sometimes with a fraction ("3599.5"); treat junk as "no expiry given"."""
+    if expires_in in (None, ""):
+        return None
+    try:
+        seconds = float(expires_in)
+    except (TypeError, ValueError):
+        log.warning("ignoring invalid expires_in %r", expires_in)
+        return None
+    return int(time.time() + seconds) if seconds > 0 else None
 
 
 def _public_client(client: dict) -> dict:

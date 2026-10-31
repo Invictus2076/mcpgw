@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+class StoreError(RuntimeError):
+    """The credential store can't be read (e.g. the file is corrupt)."""
+
+
 class TokenStore(Protocol):
     async def get(self, key: str) -> dict[str, Any] | None: ...
     async def put(self, key: str, value: dict[str, Any]) -> None: ...
@@ -58,9 +62,16 @@ class FileStore:
         if self._data is None:
             try:
                 with open(self.path, encoding="utf-8") as f:
-                    self._data = json.load(f)
+                    data = json.load(f)
             except FileNotFoundError:
-                self._data = {}
+                data = {}
+            except (ValueError, UnicodeDecodeError) as e:
+                # Never silently start over: that would discard every credential.
+                raise StoreError(f"{self.path} is not valid JSON ({e}); fix it or delete it "
+                                 "and connect your servers again") from None
+            if not isinstance(data, dict):
+                raise StoreError(f"{self.path} must contain a JSON object")
+            self._data = data
         return self._data
 
     def _flush(self) -> None:

@@ -139,8 +139,10 @@ class Gateway:
 
     async def disconnect(self, server: str) -> None:
         assert self.auth
+        up = self.upstreams.get(server)
+        if up is None:
+            raise KeyError(server)
         await self.auth.disconnect(server)
-        up = self.upstreams[server]
         await up.close()
         up.reset()
         up.status = "unknown"
@@ -166,6 +168,8 @@ class Gateway:
                 "tools": len(up.cached_tools() or []) if up.cached_tools() is not None else None,
                 "scopes": (tok or {}).get("scopes") or [],
                 "expires_at": (tok or {}).get("expires_at"),
+                # bumps each time a browser sign-in completes (lets `mcpgw login` wait for *this* one)
+                "auth_generation": self.auth.generation(name),
                 "error": up.last_error,
             }
             if up.cfg.auth == "oauth" and not up.problems() and (not connected or up.status == "needs_auth"):

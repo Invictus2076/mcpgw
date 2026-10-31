@@ -55,7 +55,9 @@ class Signer:
         if not isinstance(blob, str) or not blob.startswith(prefix):
             return None
         body, _, mac = blob[len(prefix):].rpartition(".")
-        if not body or not hmac.compare_digest(mac, self._mac(prefix, body)):
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str input,
+        # and these blobs arrive from URLs and request bodies.
+        if not body or not hmac.compare_digest(mac.encode("utf-8"), self._mac(prefix, body).encode()):
             return None
         try:
             payload = json.loads(b64url_decode(body))

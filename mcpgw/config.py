@@ -142,13 +142,35 @@ def _str_list(v: Any, what: str) -> list[str]:
     raise ConfigError(f"{what} must be a list of strings")
 
 
+def _number(v: Any, what: str, cast=float, *, minimum: float | None = None,
+            maximum: float | None = None):
+    """Convert a config value to a number, raising ConfigError (not ValueError)."""
+    if isinstance(v, bool):
+        raise ConfigError(f"{what} must be a number, not {v!r}")
+    try:
+        n = cast(v)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{what} must be a number, not {v!r}") from None
+    if (minimum is not None and n < minimum) or (maximum is not None and n > maximum):
+        raise ConfigError(f"{what} must be between {minimum} and {maximum}, not {v!r}")
+    return n
+
+
+def _table(v: Any, what: str) -> dict:
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"{what} must be a table")
+    return v
+
+
 def parse_config(raw: dict[str, Any]) -> GatewayConfig:
     missing: set[str] = set()
     raw = _interpolate(raw, missing)
-    gw = raw.get("gateway", {}) or {}
+    gw = _table(raw.get("gateway"), "[gateway]")
     cfg = GatewayConfig()
     cfg.host = str(gw.get("host", cfg.host))
-    cfg.port = int(gw.get("port", cfg.port))
+    cfg.port = _number(gw.get("port", cfg.port), "gateway.port", int, minimum=1, maximum=65535)
     cfg.public_url = (_str_or_none(gw.get("public_url")) or f"http://localhost:{cfg.port}").rstrip("/")
     cfg.api_key = _str_or_none(gw.get("api_key"))
     cfg.state_dir = Path(os.path.expanduser(str(gw.get("state_dir", cfg.state_dir))))
@@ -157,8 +179,10 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
     cfg.client_metadata_url = _str_or_none(gw.get("client_metadata_url"))
     cfg.plugins = _str_list(gw.get("plugins"), "gateway.plugins")
     cfg.expose_connect_tools = bool(gw.get("expose_connect_tools", True))
-    cfg.auth_wait_seconds = float(gw.get("auth_wait_seconds", cfg.auth_wait_seconds))
-    cfg.tool_list_ttl = float(gw.get("tool_list_ttl", cfg.tool_list_ttl))
+    cfg.auth_wait_seconds = _number(gw.get("auth_wait_seconds", cfg.auth_wait_seconds),
+                                    "gateway.auth_wait_seconds", minimum=0, maximum=3600)
+    cfg.tool_list_ttl = _number(gw.get("tool_list_ttl", cfg.tool_list_ttl),
+                                "gateway.tool_list_ttl", minimum=0, maximum=86400)
 
     if not cfg.separator or not re.fullmatch(r"[A-Za-z0-9_.\-]+", cfg.separator):
         raise ConfigError("gateway.separator must be non-empty and use only [A-Za-z0-9_.-]")
@@ -174,14 +198,15 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         raise ConfigError(f"refusing to bind {cfg.host} without gateway.api_key; "
                           "set one or bind to 127.0.0.1")
 
-    for name, s in (raw.get("servers") or {}).items():
+    for name, s in _table(raw.get("servers"), "[servers]").items():
         if not _SERVER_NAME.match(name) or name in RESERVED_NAMES:
             raise ConfigError(f"invalid server name {name!r}: use [a-z0-9-], max 32 chars, not 'gateway'")
         if cfg.separator in name:
             raise ConfigError(f"server name {name!r} must not contain the separator {cfg.separator!r}")
         if not isinstance(s, dict):
             raise ConfigError(f"servers.{name} must be a table")
-        tools = s.get("tools") or {}
+        tools = _table(s.get("tools"), f"servers.{name}.tools")
+        headers = _table(s.get("headers"), f"servers.{name}.headers")
         sc = ServerConfig(
             name=name,
             provider=str(s.get("provider", "generic")),
@@ -193,8 +218,8 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
             client_secret=_str_or_none(s.get("client_secret")),
             token_endpoint_auth_method=_str_or_none(s.get("token_endpoint_auth_method")),
             scopes=_str_list(s["scopes"], f"servers.{name}.scopes") if "scopes" in s else None,
-            headers={str(k): str(v) for k, v in (s.get("headers") or {}).items()},
-            timeout=float(s.get("timeout", 60.0)),
+            headers={str(k): str(v) for k, v in headers.items()},
+            timeout=_number(s.get("timeout", 60.0), f"servers.{name}.timeout", minimum=1, maximum=3600),
             tools_allow=_str_list(tools.get("allow"), f"servers.{name}.tools.allow"),
             tools_deny=_str_list(tools.get("deny"), f"servers.{name}.tools.deny"),
             protocol=str(s.get("protocol", "auto")),
@@ -217,5 +242,9 @@ def load_config(path: str | os.PathLike | None = None) -> GatewayConfig:
     path = Path(path or os.environ.get("MCPGW_CONFIG", "mcpgw.toml"))
     if not path.exists():
         raise ConfigError(f"config file not found: {path}")
-    with open(path, "rb") as f:
-        return parse_config(tomllib.load(f))
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"{path} is not valid TOML: {e}") from None
+    return parse_config(raw)
