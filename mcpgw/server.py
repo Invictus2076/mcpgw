@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import hmac
 import json
@@ -18,9 +19,9 @@ from .config import is_loopback_host
 from .gateway import CallContext, ConnectRequired, Gateway
 from .oauth import OAuthError
 from .protocol import (
-    ALL_VERSIONS, HEADER_MISMATCH, INVALID_REQUEST, LATEST_LEGACY, LEGACY_VERSIONS, META_CLIENT_CAPS,
+    ALL_VERSIONS, HEADER_MISMATCH, INTERNAL_ERROR, INVALID_REQUEST, LATEST_LEGACY, LEGACY_VERSIONS, META_CLIENT_CAPS,
     META_SERVER_INFO, META_VERSION, METHOD_NOT_FOUND, MODERN_VERSIONS, NAME_HEADER_METHODS, PARSE_ERROR,
-    SERVER_INFO, UNSUPPORTED_PROTOCOL_VERSION, RpcError, decode_header_value, rpc_error, rpc_result,
+    RESOURCE_NOT_FOUND, SERVER_INFO, UNSUPPORTED_PROTOCOL_VERSION, RpcError, decode_header_value, rpc_error, rpc_result,
 )
 
 log = logging.getLogger("mcpgw.server")
@@ -30,8 +31,14 @@ SESSIONS_KEY = web.AppKey("sessions", dict)
 ORIGINS_KEY = web.AppKey("allowed_origins", set)
 MAX_SESSIONS = 1000
 SESSION_IDLE = 24 * 3600
-INSTRUCTIONS = ("Tools are namespaced as <server>{sep}<tool>. If a server isn't connected yet, "
-                "call gateway{sep}connect_<server> (or follow the link the gateway returns) and retry.")
+INSTRUCTIONS = ("Tools and prompts are namespaced as <server>{sep}<name>; resource URIs are passed "
+                "through unchanged. If a server isn't connected yet, call gateway{sep}connect_<server> "
+                "(or follow the link the gateway returns) and retry.")
+CAPABILITIES = {
+    "tools": {"listChanged": False},
+    "prompts": {"listChanged": False},
+    "resources": {"listChanged": False, "subscribe": False},
+}
 
 
 @dataclass
@@ -168,7 +175,7 @@ async def handle_mcp(request: web.Request) -> web.StreamResponse:
                                     params.get("clientInfo") or {}, scope)
         result = {
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": CAPABILITIES,
             "serverInfo": SERVER_INFO,
             "instructions": INSTRUCTIONS.format(sep=gw.sep),
         }
@@ -201,11 +208,18 @@ async def handle_mcp(request: web.Request) -> web.StreamResponse:
     return web.json_response(rpc_result(req_id, result))
 
 
+LISTINGS = {
+    "prompts/list": ("list_prompts", "prompts"),
+    "resources/list": ("list_resources", "resources"),
+    "resources/templates/list": ("list_resource_templates", "resourceTemplates"),
+}
+
+
 async def _dispatch(gw: Gateway, method: str, params: dict, ctx: CallContext) -> dict:
     modern = ctx.era == "modern"
     if method == "server/discover" and modern:
         return {"supportedVersions": list(ALL_VERSIONS),
-                "capabilities": {"tools": {"listChanged": False}},
+                "capabilities": CAPABILITIES,
                 "instructions": INSTRUCTIONS.format(sep=gw.sep), "ttlMs": 60_000, "cacheScope": "private"}
     if method == "ping" and not modern:
         return {}
@@ -224,6 +238,20 @@ async def _dispatch(gw: Gateway, method: str, params: dict, ctx: CallContext) ->
             rs = params.get("requestState")
             ctx.request_state = rs if isinstance(rs, str) else None
         return await gw.call_tool(name, params.get("arguments"), ctx)
+    if method in LISTINGS:
+        attr, key = LISTINGS[method]
+        items, ttl_ms = await getattr(gw, attr)(ctx.scope)
+        listing: dict = {key: items}
+        if modern:
+            listing.update(ttlMs=ttl_ms, cacheScope="private")
+        return listing
+    if method == "prompts/get":
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise RpcError(-32602, "params.name is required")
+        return await gw.get_prompt(name, params.get("arguments"), ctx)
+    if method == "resources/read":
+        return await gw.read_resource(params.get("uri"), ctx)
     raise RpcError(METHOD_NOT_FOUND, f"Method not found: {method}", http_status=404 if modern else 200)
 
 
@@ -359,24 +387,61 @@ async def api_tools(request: web.Request) -> web.Response:
     return web.json_response({"tools": tools})
 
 
-async def api_call(request: web.Request) -> web.Response:
-    gw: Gateway = request.app[GW_KEY]
+async def _json_body(request: web.Request, required: str) -> dict | web.Response:
     try:
         body = await request.json()
     except ValueError:
         return web.json_response({"error": "invalid JSON"}, status=400)
-    if not isinstance(body, dict) or not isinstance(body.get("name"), str):
-        return web.json_response({"error": "expected {\"name\": ..., \"arguments\": {...}}"}, status=400)
+    if not isinstance(body, dict) or not isinstance(body.get(required), str):
+        return web.json_response({"error": f"expected a JSON object with a string {required!r}"}, status=400)
+    return body
+
+
+async def _rest(coro) -> web.Response:
+    """Run a gateway call for the REST API and map its errors to HTTP statuses."""
     try:
-        result = await gw.call_tool(body["name"], body.get("arguments"), CallContext("rest"))
+        result = await coro
     except ConnectRequired as e:
         return web.json_response({"error": "connect_required", "server": e.server,
                                   "message": e.message, "connect_url": e.url}, status=409)
     except RpcError as e:
-        not_found = e.code == -32602 and e.message.startswith("Unknown tool")
+        not_found = e.code == RESOURCE_NOT_FOUND or (
+            e.code == -32602 and e.message.startswith(("Unknown tool", "Unknown prompt")))
         return web.json_response({"error": e.message, "code": e.code, "data": e.data},
-                                 status=404 if not_found else 400)
+                                 status=404 if not_found else 502 if e.code == INTERNAL_ERROR else 400)
     return web.json_response({"result": result})
+
+
+async def api_call(request: web.Request) -> web.Response:
+    body = await _json_body(request, "name")
+    if isinstance(body, web.Response):
+        return body
+    return await _rest(request.app[GW_KEY].call_tool(body["name"], body.get("arguments"), CallContext("rest")))
+
+
+async def api_prompts(request: web.Request) -> web.Response:
+    prompts, _ = await request.app[GW_KEY].list_prompts()
+    return web.json_response({"prompts": prompts})
+
+
+async def api_prompt_get(request: web.Request) -> web.Response:
+    body = await _json_body(request, "name")
+    if isinstance(body, web.Response):
+        return body
+    return await _rest(request.app[GW_KEY].get_prompt(body["name"], body.get("arguments"), CallContext("rest")))
+
+
+async def api_resources(request: web.Request) -> web.Response:
+    gw: Gateway = request.app[GW_KEY]
+    (resources, _), (templates, _) = await asyncio.gather(gw.list_resources(), gw.list_resource_templates())
+    return web.json_response({"resources": resources, "resourceTemplates": templates})
+
+
+async def api_resource_read(request: web.Request) -> web.Response:
+    body = await _json_body(request, "uri")
+    if isinstance(body, web.Response):
+        return body
+    return await _rest(request.app[GW_KEY].read_resource(body["uri"], CallContext("rest")))
 
 
 async def healthz(request: web.Request) -> web.Response:
@@ -415,6 +480,10 @@ def create_app(gw: Gateway) -> web.Application:
     r.add_post("/api/servers/{server}/disconnect", api_disconnect)
     r.add_get("/api/tools", api_tools)
     r.add_post("/api/tools/call", api_call)
+    r.add_get("/api/prompts", api_prompts)
+    r.add_post("/api/prompts/get", api_prompt_get)
+    r.add_get("/api/resources", api_resources)
+    r.add_post("/api/resources/read", api_resource_read)
     r.add_get("/healthz", healthz)
     # Make OAuth-aware MCP clients fail fast instead of probing for gateway OAuth.
     r.add_get("/.well-known/{tail:.*}", not_found)

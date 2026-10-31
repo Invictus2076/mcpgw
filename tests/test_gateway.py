@@ -24,6 +24,7 @@ from mock_provider import MockProvider  # noqa: E402
 
 from mcpgw.config import parse_config  # noqa: E402
 from mcpgw.gateway import Gateway  # noqa: E402
+from mcpgw.protocol import NAME_HEADER_METHODS, encode_header_value  # noqa: E402
 from mcpgw.server import create_app  # noqa: E402
 from mcpgw.store import MemoryStore  # noqa: E402
 
@@ -83,8 +84,9 @@ class Harness:
                       "io.modelcontextprotocol/clientCapabilities": caps or {}}
         h = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": version,
              "Mcp-Method": method, **self.api_headers}
-        if method == "tools/call":
-            h["Mcp-Name"] = p["name"]
+        name_field = NAME_HEADER_METHODS.get(method)
+        if name_field and isinstance(p.get(name_field), str):
+            h["Mcp-Name"] = encode_header_value(p[name_field])
         h.update(headers or {})
         body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": p}
         async with self.http.post(self.base + path, json=body, headers=h) as r:
@@ -531,7 +533,7 @@ class EndpointConformanceTests(unittest.IsolatedAsyncioTestCase):
             st, body = await h.modern("tools/list", version="2099-01-01")
             self.assertEqual((st, body["error"]["code"]), (400, -32022))
             self.assertIn(MODERN, body["error"]["data"]["supported"])
-            st, body = await h.modern("resources/list")
+            st, body = await h.modern("completion/complete")
             self.assertEqual((st, body["error"]["code"]), (404, -32601))
 
     async def test_legacy_endpoint_rules(self):

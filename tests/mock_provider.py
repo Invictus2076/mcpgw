@@ -51,6 +51,20 @@ TOOLS = [
 ]
 
 
+def _prompts(scheme: str) -> list[dict]:
+    return [{"name": "summarize", "description": "Summarize a text",
+             "arguments": [{"name": "text", "description": "Text to summarize", "required": True}]}]
+
+
+def _resources(scheme: str) -> list[dict]:
+    return [{"uri": f"{scheme}://docs/readme", "name": "readme", "mimeType": "text/plain",
+             "description": "The project readme"}]
+
+
+def _templates(scheme: str) -> list[dict]:
+    return [{"uriTemplate": f"{scheme}://notes/{{id}}", "name": "note", "mimeType": "text/plain"}]
+
+
 @dataclass
 class MockProvider:
     era: str = "modern"  # modern | legacy | dual
@@ -71,6 +85,44 @@ class MockProvider:
     base_scopes: list[str] = field(default_factory=lambda: ["read"])
     write_scope: str = "write"
     big_tools: int = 0  # extra padded tools, to force multi-chunk responses
+    features: bool = True  # also serve prompts and resources
+    scheme: str = "mock"  # resource URI scheme, so two mocks don't collide
+
+    def capabilities(self) -> dict:
+        caps: dict = {"tools": {"listChanged": True}}
+        if self.features:
+            caps.update(prompts={}, resources={})
+        return caps
+
+    def _feature_result(self, method: str, params: dict) -> dict | tuple[int, str] | None:
+        """Shared prompts/resources handling. Returns a result, an (code, message) error,
+        or None if ``method`` isn't a prompts/resources method."""
+        if not self.features or not method.startswith(("prompts/", "resources/")):
+            return None
+        if method == "prompts/list":
+            return {"prompts": _prompts(self.scheme)}
+        if method == "prompts/get":
+            if params.get("name") != "summarize":
+                return (-32602, f"Unknown prompt: {params.get('name')}")
+            text = (params.get("arguments") or {}).get("text")
+            if not text:
+                return (-32602, "Missing required argument: text")
+            return {"description": "Summarize a text", "messages": [
+                {"role": "user", "content": {"type": "text", "text": f"Summarize: {text}"}}]}
+        if method == "resources/list":
+            return {"resources": _resources(self.scheme)}
+        if method == "resources/templates/list":
+            return {"resourceTemplates": _templates(self.scheme)}
+        if method == "resources/read":
+            uri = params.get("uri", "")
+            if uri == f"{self.scheme}://docs/readme":
+                text = f"# {self.scheme} readme"
+            elif uri.startswith(f"{self.scheme}://notes/"):
+                text = f"note {uri.rsplit('/', 1)[1]}"
+            else:
+                return (-32002, "Resource not found")
+            return {"contents": [{"uri": uri, "mimeType": "text/plain", "text": text}]}
+        return (-32601, "Method not found")
 
     def __post_init__(self) -> None:
         self.clients: dict[str, dict] = {}
@@ -337,15 +389,21 @@ class MockProvider:
                                   "requested": hv})
         if request.headers.get("Mcp-Method") != method:
             return self._rpc_err(rid, -32020, "Mcp-Method mismatch", 400)
-        if method == "tools/call":
-            if _decode_header(request.headers.get("Mcp-Name", "")) != params.get("name"):
+        name_field = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}.get(method)
+        if name_field:
+            if _decode_header(request.headers.get("Mcp-Name", "")) != params.get(name_field):
                 return self._rpc_err(rid, -32020, "Mcp-Name mismatch", 400)
         if "id" not in msg:
             return web.Response(status=202)
         caps = meta.get("io.modelcontextprotocol/clientCapabilities") or {}
+        feature = self._feature_result(method, params)
+        if isinstance(feature, tuple):
+            return self._rpc_err(rid, feature[0], feature[1], 404 if feature[0] == -32601 else 200)
+        if feature is not None:
+            return self._ok(rid, {"resultType": "complete", **feature})
         if method == "server/discover":
             return self._ok(rid, {"resultType": "complete", "supportedVersions": [MODERN],
-                                  "capabilities": {"tools": {}},
+                                  "capabilities": self.capabilities(),
                                   "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "mock", "version": "1"}},
                                   "ttlMs": 60000, "cacheScope": "private"})
         if method == "tools/list":
@@ -382,7 +440,7 @@ class MockProvider:
             version = params.get("protocolVersion") if params.get("protocolVersion") in LEGACY else LEGACY[0]
             self.sessions[sid] = version
             return web.json_response({"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": version, "capabilities": {"tools": {"listChanged": True}},
+                "protocolVersion": version, "capabilities": self.capabilities(),
                 "serverInfo": {"name": "mock-legacy", "version": "1"}}}, headers={"Mcp-Session-Id": sid})
         sid = request.headers.get("Mcp-Session-Id")
         if not sid:
@@ -400,6 +458,11 @@ class MockProvider:
             return await self._call(request, rid, params, info, modern=False)
         if method == "ping":
             return await self._reply(request, rid, {})
+        feature = self._feature_result(method, params)
+        if isinstance(feature, tuple):
+            return self._rpc_err(rid, feature[0], feature[1])
+        if feature is not None:
+            return await self._reply(request, rid, feature)
         return self._rpc_err(rid, -32601, "Method not found")
 
     async def _call(self, request, rid, params, info, *, modern: bool) -> web.StreamResponse:

@@ -14,7 +14,10 @@ import aiohttp
 
 from .config import GatewayConfig
 from .oauth import AuthManager, AuthRequired, OAuthError
-from .protocol import INVALID_PARAMS, URL_ELICITATION_REQUIRED, RpcError, strip_param_headers
+from .protocol import (
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, RESOURCE_NOT_FOUND, URL_ELICITATION_REQUIRED, RpcError,
+    strip_param_headers,
+)
 from .providers import get_provider, load_plugins
 from .store import FileStore, TokenStore, load_or_create_secret
 from .upstream import Upstream, UpstreamError, UpstreamRpcError
@@ -63,6 +66,10 @@ class Gateway:
         self.auth: AuthManager | None = None
         self.upstreams: dict[str, Upstream] = {}
         self._used_tickets: dict[str, float] = {}
+        # resources/read routing: exact URIs seen in listings or tool results, and
+        # the literal prefix of each resource template, mapped to their server.
+        self._resource_owner: dict[str, str] = {}
+        self._template_prefixes: dict[str, str] = {}
         # Validate provider config eagerly so typos fail at startup.
         self._server_cfgs = {}
         for name, sc in cfg.servers.items():
@@ -133,7 +140,7 @@ class Gateway:
         server = await self.auth.complete(query)
         up = self.upstreams.get(server)
         if up:
-            up._tools = None  # tool lists may depend on the granted scopes
+            up.invalidate()  # listings may depend on the granted scopes
             up.status, up.last_error = "unknown", None
         return server
 
@@ -293,7 +300,19 @@ class Gateway:
             if isinstance(out.get("requestState"), str):
                 out["requestState"] = UPSTREAM_STATE_PREFIX + out["requestState"]
             return out
+        self._remember_resource_links(up, result)
         return result
+
+    def _remember_resource_links(self, up: Upstream, result: dict) -> None:
+        """Tool results may link to resources; remember who owns them so a later
+        resources/read on the aggregated endpoint reaches the right server."""
+        for item in result.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri") if item.get("type") == "resource_link" else (
+                (item.get("resource") or {}).get("uri") if item.get("type") == "resource" else None)
+            if isinstance(uri, str) and len(self._resource_owner) < 10_000:
+                self._resource_owner[uri] = up.name
 
     async def _after_connect_prompt(self, up: Upstream, name: str, payload: dict,
                                     ctx: CallContext) -> dict | None:
@@ -366,6 +385,154 @@ class Gateway:
         if await self.auth.token(up) and up.status != "needs_auth":
             return {"content": [{"type": "text", "text": f"{up.display_name} is already connected."}]}
         return await self._auth_prompt(up, name, {}, ctx, False, "not connected", tool_is_connect=True)
+
+    # -- prompts & resources ------------------------------------------------
+
+    async def _list_items_one(self, up: Upstream, method: str) -> list[dict] | None:
+        try:
+            return await asyncio.wait_for(up.list_items(method), timeout=min(up.cfg.timeout, 30.0))
+        except AuthRequired:
+            return None
+        except UpstreamRpcError as e:
+            log.warning("%s: %s failed: %s", up.name, method, e)
+            return None
+        except (UpstreamError, OAuthError, asyncio.TimeoutError) as e:
+            if isinstance(e, asyncio.TimeoutError):
+                up.status, up.last_error = "error", f"{method} timed out"
+            log.warning("%s: %s failed: %s", up.name, method, up.last_error or e)
+            return None
+
+    async def _gather(self, method: str, scope: str | None) -> tuple[list[tuple[Upstream, list[dict]]], int]:
+        targets = [self.upstreams[scope]] if scope else list(self.upstreams.values())
+        results = await asyncio.gather(*(self._list_items_one(u, method) for u in targets))
+        now = time.time()
+        ttl = self.cfg.tool_list_ttl
+        pairs = []
+        for up, items in zip(targets, results):
+            if items is None:
+                ttl = min(ttl, 30.0)  # a server is unreachable or not connected: re-check soon
+                continue
+            pairs.append((up, items))
+            exp = up.list_expiry(method)
+            if exp is not None:
+                ttl = min(ttl, exp - now)
+        return pairs, int(max(ttl, 0) * 1000)
+
+    async def list_prompts(self, scope: str | None = None) -> tuple[list[dict], int]:
+        pairs, ttl = await self._gather("prompts/list", scope)
+        out = []
+        for up, prompts in pairs:
+            for p in prompts:
+                p = copy.deepcopy(p)
+                if not scope:
+                    p["name"] = self.qualify(up.name, p["name"])
+                    p["description"] = f"[{up.display_name}] {p.get('description') or ''}".strip()
+                out.append(p)
+        return out, ttl
+
+    async def list_resources(self, scope: str | None = None) -> tuple[list[dict], int]:
+        pairs, ttl = await self._gather("resources/list", scope)
+        out = []
+        for up, resources in pairs:
+            for r in resources:
+                self._resource_owner[r["uri"]] = up.name
+                out.append(self._tag_resource(up, r, scope))
+        return out, ttl
+
+    async def list_resource_templates(self, scope: str | None = None) -> tuple[list[dict], int]:
+        pairs, ttl = await self._gather("resources/templates/list", scope)
+        out = []
+        for up, templates in pairs:
+            for t in templates:
+                prefix = t["uriTemplate"].split("{", 1)[0]
+                if prefix:
+                    self._template_prefixes[prefix] = up.name
+                out.append(self._tag_resource(up, t, scope))
+        return out, ttl
+
+    @staticmethod
+    def _tag_resource(up: Upstream, item: dict, scope: str | None) -> dict:
+        """Resource URIs are global identifiers, so they pass through unchanged; the
+        owning server is recorded in _meta and, on /mcp, the description."""
+        item = copy.deepcopy(item)
+        if not scope:
+            item["description"] = f"[{up.display_name}] {item.get('description') or ''}".strip()
+        meta = dict(item.get("_meta") or {})
+        meta["mcpgw/server"] = up.name
+        item["_meta"] = meta
+        return item
+
+    async def get_prompt(self, name: str, arguments: Any, ctx: CallContext) -> dict:
+        if arguments is not None and (not isinstance(arguments, dict)
+                                      or not all(isinstance(v, str) for v in arguments.values())):
+            raise RpcError(INVALID_PARAMS, "prompt arguments must be an object of strings")
+        try:
+            server, prompt = self.resolve(name, ctx.scope)
+        except RpcError:
+            raise RpcError(INVALID_PARAMS, f"Unknown prompt: {name}") from None
+        up = self.upstreams.get(server)
+        if up is None:
+            raise RpcError(INVALID_PARAMS, f"Unknown prompt: {name}")
+        return await self._feature_call(up, name, ctx, up.get_prompt(prompt, arguments))
+
+    def route_resource(self, uri: str, scope: str | None) -> str | None:
+        if scope:
+            return scope
+        if uri in self._resource_owner:
+            return self._resource_owner[uri]
+        matches = [p for p in self._template_prefixes if uri.startswith(p)]
+        if matches:
+            return self._template_prefixes[max(matches, key=len)]
+        # Last resort: the only server that has (or, not connected yet, may have) resources.
+        candidates = [u.name for u in self.upstreams.values()
+                      if u.supports("resources") or (u.era is None and not u.problems())]
+        return candidates[0] if len(candidates) == 1 else None
+
+    async def read_resource(self, uri: Any, ctx: CallContext) -> dict:
+        if not isinstance(uri, str) or not uri:
+            raise RpcError(INVALID_PARAMS, "params.uri is required")
+        server = self.route_resource(uri, ctx.scope)
+        if server is None:
+            # Unknown URI: refresh the listings once, then route again.
+            await asyncio.gather(self.list_resources(), self.list_resource_templates())
+            server = self.route_resource(uri, ctx.scope)
+        up = self.upstreams.get(server or "")
+        if up is None:
+            data: dict[str, Any] = {"uri": uri}
+            pending = [u.name for u in self.upstreams.values() if u.status == "needs_auth"]
+            if pending:  # the owner may be a server the user hasn't connected yet
+                data["notConnected"] = pending
+            raise RpcError(RESOURCE_NOT_FOUND, "Resource not found", data)
+        return await self._feature_call(up, uri, ctx, up.read_resource(uri))
+
+    async def _feature_call(self, up: Upstream, name: str, ctx: CallContext, coro) -> dict:
+        """Run a prompts/get or resources/read call, mapping failures to JSON-RPC errors."""
+        try:
+            return await coro
+        except AuthRequired as e:
+            raise self._auth_rpc_error(up, name, ctx, e.step_up) from e
+        except UpstreamRpcError as e:
+            raise RpcError(e.code, e.message, e.data) from e
+        except (UpstreamError, OAuthError) as e:
+            raise RpcError(INTERNAL_ERROR, f"{up.display_name} is unavailable: {e}") from e
+
+    def _auth_rpc_error(self, up: Upstream, name: str, ctx: CallContext, step_up: bool) -> Exception:
+        """Prompts and resources can't return a tool result, so a needed sign-in is an error."""
+        if up.problems():
+            return RpcError(INVALID_REQUEST, f"{up.display_name} can't be connected: {up.problems()[0]}")
+        if up.cfg.auth != "oauth":
+            return RpcError(INVALID_REQUEST, f"{up.display_name} rejected the gateway's credentials")
+        url = self.connect_url(up.name, step_up=step_up)
+        message = f"{'Grant additional permissions to' if step_up else 'Connect'} {up.display_name} to continue ({name})."
+        if ctx.era == "rest":
+            return ConnectRequired(up.name, url, message)
+        elicit = ctx.client_caps.get("elicitation")
+        if ctx.era == "legacy" and isinstance(elicit, dict) and "url" in elicit:
+            return RpcError(URL_ELICITATION_REQUIRED, "This request requires more information.", {
+                "elicitations": [{"mode": "url", "elicitationId": str(uuid.uuid4()), "url": url,
+                                  "message": message}]})
+        return RpcError(INVALID_REQUEST, f"{message} Open this link to sign in, then retry: {url}",
+                        {"connectUrl": url, "server": up.name})
 
     async def _builtin(self, tool: str, ctx: CallContext, name: str) -> dict:
         if tool == "status":

@@ -63,6 +63,7 @@ class Upstream:
         self._tools: list[dict] | None = None
         self._tools_expire = 0.0
         self._param_headers: dict[str, list] = {}
+        self._lists: dict[str, tuple[list[dict], float]] = {}  # prompts/resources caches
         self._bg: set[asyncio.Task] = set()
         self._warned: set[str] = set()
         if self.problems():
@@ -321,6 +322,12 @@ class Upstream:
         self.session_id = None
         self._tools = None
         self._tools_expire = 0.0
+        self._lists = {}
+
+    def invalidate(self) -> None:
+        """Drop cached listings (e.g. after a new sign-in changed the granted scopes)."""
+        self._tools = None
+        self._lists = {}
 
     # -- RPC ----------------------------------------------------------------
 
@@ -447,6 +454,61 @@ class Upstream:
                 await self.list_tools()
             extra = param_header_values(self._param_headers.get(name, []), params["arguments"])
         return await self.rpc("tools/call", params, caps=caps, extra_headers=extra)
+
+    # -- prompts & resources ------------------------------------------------
+
+    # list method -> (server capability, result key, identifying field)
+    LISTS = {
+        "prompts/list": ("prompts", "prompts", "name"),
+        "resources/list": ("resources", "resources", "uri"),
+        "resources/templates/list": ("resources", "resourceTemplates", "uriTemplate"),
+    }
+
+    def supports(self, capability: str) -> bool:
+        """Servers must declare prompts/resources; tools are assumed when unknown."""
+        return capability in (self.capabilities or {})
+
+    async def list_items(self, method: str, *, force: bool = False) -> list[dict]:
+        """All pages of a prompts/resources listing, cached like tools/list."""
+        capability, key, id_field = self.LISTS[method]
+        cached = self._lists.get(method)
+        if cached and not force and time.time() < cached[1]:
+            return cached[0]
+        await self.ready()
+        items: list[dict] = []
+        ttl_ms = None
+        if self.supports(capability):
+            cursor = None
+            for _ in range(100):
+                try:
+                    result = await self.rpc(method, {"cursor": cursor} if cursor else {})
+                except UpstreamRpcError as e:
+                    if e.code == -32601:  # declared but not implemented: treat as empty
+                        break
+                    raise
+                page = result.get(key) or []
+                items.extend(x for x in page if isinstance(x, dict) and isinstance(x.get(id_field), str))
+                if isinstance(result.get("ttlMs"), (int, float)):
+                    ttl_ms = result["ttlMs"] if ttl_ms is None else min(ttl_ms, result["ttlMs"])
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    break
+        ttl = ttl_ms / 1000.0 if ttl_ms is not None else self.gw.tool_list_ttl
+        self._lists[method] = (items, time.time() + max(0.0, min(ttl, 3600.0)))
+        return items
+
+    def list_expiry(self, method: str) -> float | None:
+        cached = self._lists.get(method)
+        return cached[1] if cached else None
+
+    async def get_prompt(self, name: str, arguments: dict | None) -> dict:
+        params: dict[str, Any] = {"name": name}
+        if arguments:
+            params["arguments"] = arguments
+        return await self.rpc("prompts/get", params)
+
+    async def read_resource(self, uri: str) -> dict:
+        return await self.rpc("resources/read", {"uri": uri})
 
     async def close(self) -> None:
         if self.era == "legacy" and self.session_id:
