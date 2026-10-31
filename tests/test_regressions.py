@@ -15,6 +15,7 @@ from aiohttp import web
 from test_gateway import Harness  # sets up sys.path
 from mock_provider import MockProvider
 
+from mcpgw.__main__ import main
 from mcpgw.config import ConfigError, load_config, parse_config
 from mcpgw.oauth import _expires_at
 from mcpgw.store import FileStore, StoreError
@@ -138,6 +139,54 @@ class RestRegressionTests(unittest.IsolatedAsyncioTestCase):
             await h.connect("mock")
             _, data = await h.api("GET", "/api/servers")
             self.assertEqual(data["servers"][0]["auth_generation"], 1)
+
+
+class CliTests(unittest.TestCase):
+    def run_cli(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cfg = os.path.join(self.tmp.name, "mcpgw.toml")
+        port = 1 + (os.getpid() % 20000) + 30000  # nothing listens here
+        Path(self.cfg).write_text(f'[gateway]\nport = {port}\nstate_dir = "{self.tmp.name}"\n'
+                                  '[servers.notion]\nprovider = "notion"\n')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_logout_unknown_server(self):
+        code, _, err = self.run_cli("-c", self.cfg, "logout", "nope")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown server 'nope'", err)
+
+    def test_init_writes_a_loadable_config(self):
+        path = os.path.join(self.tmp.name, "new.toml")
+        code, out, _ = self.run_cli("-c", path, "init", "notion", "linear", "stripe")
+        self.assertEqual(code, 0, out)
+        cfg = load_config(path)
+        self.assertEqual(set(cfg.servers), {"notion", "linear", "stripe"})
+        code, _, err = self.run_cli("-c", path, "init")
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", err)
+        code, _, err = self.run_cli("-c", path, "init", "--force", "bogus")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown provider", err)
+
+    def test_bad_arguments_json(self):
+        code, _, err = self.run_cli("-c", self.cfg, "call", "notion__search", "[1, 2]")
+        self.assertEqual(code, 2)
+        self.assertIn("JSON object", err)
+
+    def test_version(self):
+        from mcpgw import __version__
+        with self.assertRaises(SystemExit) as cm, contextlib.redirect_stdout(io.StringIO()) as out:
+            main(["--version"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn(__version__, out.getvalue())
 
 
 if __name__ == "__main__":
