@@ -1,15 +1,50 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mcpgw"
-version = "0.1.1"
+# The import package and the command are both "mcpgw"; the PyPI name differs
+# because "mcpgw" on PyPI belongs to an unrelated project.
+name = "mcpgw-gateway"
+dynamic = ["version"]
 description = "Lightweight, pluggable gateway for Streamable HTTP MCP servers with built-in OAuth 2.1"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Siddharth Khati" }]
+keywords = ["mcp", "model-context-protocol", "gateway", "oauth", "oauth2", "llm", "agents", "proxy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: AsyncIO",
+    "Framework :: aiohttp",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = ["aiohttp>=3.9"]
+
+[project.optional-dependencies]
+# The suite runs on the standard library; Playwright adds a real-browser sign-in test.
+test = ["playwright>=1.40"]
+
+[project.urls]
+Homepage = "https://github.com/Invictus2076/mcpgw"
+Documentation = "https://github.com/Invictus2076/mcpgw#readme"
+Changelog = "https://github.com/Invictus2076/mcpgw/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Invictus2076/mcpgw/issues"
+Source = "https://github.com/Invictus2076/mcpgw"
 
 [project.scripts]
 mcpgw = "mcpgw.__main__:main"
@@ -18,5 +53,11 @@ mcpgw = "mcpgw.__main__:main"
 #   [project.entry-points."mcpgw.providers"]
 #   acme = "acme_mcpgw:AcmeProvider"
 
+[tool.setuptools.dynamic]
+version = { attr = "mcpgw.__version__" }
+
 [tool.setuptools.packages.find]
 include = ["mcpgw*"]
+
+[tool.setuptools.package-data]
+mcpgw = ["py.typed"]

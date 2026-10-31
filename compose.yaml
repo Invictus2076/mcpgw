@@ -1,0 +1,17 @@
+# docker compose up -d   (needs MCPGW_API_KEY in the environment or an .env file)
+# Then connect a server:  docker compose exec mcpgw mcpgw login notion --no-browser
+services:
+  mcpgw:
+    image: ghcr.io/invictus2076/mcpgw:latest
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"   # loopback only; OAuth redirects go to http://localhost:8765
+    environment:
+      MCPGW_API_KEY: ${MCPGW_API_KEY:?set MCPGW_API_KEY, e.g. python -c "import secrets; print(secrets.token_urlsafe(32))"}
+    volumes:
+      - mcpgw-data:/data        # credentials.json and secret.key
+      # - ./mcpgw.toml:/etc/mcpgw/mcpgw.toml:ro   # your own server list
+    restart: unless-stopped
+
+volumes:
+  mcpgw-data:

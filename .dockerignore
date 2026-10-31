@@ -1,0 +1,12 @@
+.git
+.github
+**/__pycache__
+*.egg-info
+build
+dist
+.venv
+venv
+mcpgw.toml
+.mcpgw
+credentials.json
+secret.key

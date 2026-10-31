@@ -7,7 +7,9 @@ dist/
 venv/
 .env
 # local config and credentials: never commit these
-mcpgw.toml
+/mcpgw.toml
 .mcpgw/
 credentials.json
 secret.key
+# local Docker state from compose.yaml
+data/

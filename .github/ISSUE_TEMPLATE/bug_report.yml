@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in mcpgw doesn't work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please **don't paste tokens, API keys or the contents of credentials.json**. mcpgw's logs never contain tokens, so `mcpgw -v serve` output is safe to share.
+        Security problems go through private reporting instead: see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. mcpgw.toml with [servers.notion] provider = "notion"
+        2. mcpgw serve
+        3. ...
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `mcpgw doctor`
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output (`mcpgw -v serve`)
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: mcpgw version
+      placeholder: "mcpgw --version"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, Python version and MCP client
+      placeholder: "Windows 11, Python 3.13, Claude Code 2.x"

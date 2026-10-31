@@ -1,0 +1,6 @@
+# Extra files for the source distribution (the wheel contains only the package).
+include CHANGELOG.md CONTRIBUTING.md SECURITY.md mcpgw.example.toml
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include docker *.toml
+recursive-include tests *.py

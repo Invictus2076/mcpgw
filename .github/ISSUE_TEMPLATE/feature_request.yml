@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest a feature or a new provider preset
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem first; the solution you have in mind second.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: input
+    id: provider
+    attributes:
+      label: For a new provider preset, the MCP server URL and its docs

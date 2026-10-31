@@ -1,0 +1,140 @@
+name: Release
+
+# Pushing a tag like v0.2.0 runs the tests, then publishes:
+#   - a GitHub release with the CHANGELOG section as notes and the built files attached
+#   - the package to PyPI as mcpgw-gateway (trusted publishing, see docs/releasing.md)
+#   - a multi-arch image to ghcr.io/<owner>/mcpgw
+# Run it by hand (Actions > Release > Run workflow) to create the GitHub release
+# for an older tag; that path never publishes to PyPI or GHCR.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to create a GitHub release for (e.g. v0.1.1)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: Test and build ${{ inputs.tag || github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          path: src
+      - name: Check out release tooling
+        uses: actions/checkout@v4
+        with:
+          path: tools
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Version must match the tag
+        if: github.event_name == 'push'
+        working-directory: src
+        run: |
+          version=$(python -c "import mcpgw; print(mcpgw.__version__)")
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match mcpgw.__version__ $version"; exit 1
+          fi
+      - name: Test
+        working-directory: src
+        run: |
+          python -m pip install .
+          python -m unittest discover -s tests
+      - name: Build
+        working-directory: src
+        run: |
+          python -m pip install build twine
+          python -m build --outdir ../dist
+          python -m twine check --strict ../dist/*
+      - name: Release notes
+        run: python tools/scripts/release_notes.py "$TAG" src/CHANGELOG.md > notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/
+            notes.md
+
+  github-release:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: mcpgw ${{ env.TAG }}
+          body_path: notes.md
+          files: dist/*
+          prerelease: ${{ contains(env.TAG, '-') }}
+          make_latest: ${{ github.event_name == 'push' && !contains(env.TAG, '-') }}
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mcpgw-gateway
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  docker:
+    name: Publish container image
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mcpgw" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
