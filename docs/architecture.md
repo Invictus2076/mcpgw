@@ -25,10 +25,10 @@ This document explains how mcpgw is put together, why each piece exists, and whi
 | `providers/` | `Provider` base class, registry, plugin loading, and the built-in presets |
 | `store.py` | `TokenStore` protocol, `FileStore` (atomic, mode 0600) and `MemoryStore`, plus the per-install HMAC secret |
 | `oauth.py` | `AuthManager`: discovery, client registration, the authorization code flow, refresh, and step-up |
-| `upstream.py` | `Upstream`: Streamable HTTP client for one server, with era detection, SSE parsing and tool caching |
-| `gateway.py` | `Gateway`: aggregation, name resolution, connect links, auth prompts, MRTR passthrough |
+| `upstream.py` | `Upstream`: Streamable HTTP client for one server, with era detection, SSE parsing, and cached tool, prompt and resource listings |
+| `gateway.py` | `Gateway`: aggregation of tools, prompts and resources, name and URI routing, connect links, auth prompts, MRTR passthrough |
 | `server.py` | aiohttp app: the dual-era `/mcp` endpoint, browser pages, REST API, security middleware |
-| `__main__.py` | CLI |
+| `__main__.py` | CLI, including `init` and `doctor` |
 
 ## Protocol eras
 
@@ -78,6 +78,23 @@ Tools are exposed as `<server><separator><tool>`, with `__` as the default separ
 `/mcp/<server>` is a scoped endpoint. It exposes one upstream's tools without the prefix, plus `mcpgw_connect` while that server isn't connected.
 
 `tools/list` fans out to all upstreams concurrently, with a timeout for each. A failing or unauthorized server never hides the others' tools. Each upstream's list is cached for its own `ttlMs`, or for `tool_list_ttl` when the server doesn't send one. The aggregated `ttlMs` is the smallest remaining lifetime, capped at 30 seconds while any server still needs authorization.
+
+### Prompts and resources
+
+`prompts/list`, `resources/list` and `resources/templates/list` work the same way: a concurrent fan-out, per-upstream caching and the same TTL rule. An upstream is asked only if it declared the `prompts` or `resources` capability. A server that declares one but answers `-32601` is treated as having none.
+
+- **Prompts** are namespaced like tools (`<server>__<prompt>`), and `prompts/get` is routed the same way. Arguments must be an object of strings, as the spec requires.
+- **Resources** are different. A URI is a global identifier that other content may already reference, for example a `resource_link` in a tool result. Rewriting URIs would break those references, so URIs pass through unchanged and the owning server is recorded in `_meta["mcpgw/server"]`. `resources/read` is routed by, in order:
+  1. exact URIs seen in listings, or in `resource_link` and embedded resources in tool results;
+  2. the longest literal prefix of a URI template (`notion://pages/{id}` → `notion://pages/`);
+  3. the only server that has, or may have, resources.
+
+  If none matches, the gateway re-lists once and tries again. If that fails, it answers `-32002` "Resource not found", listing any servers that still need sign-in.
+
+A prompt or resource can't return a tool result, so a needed sign-in is a JSON-RPC error carrying the connect link instead:
+- `-32042` URL elicitation for 2025-11-25 clients that support it;
+- `-32600`, with the link in the message and in `data.connectUrl`, for everyone else;
+- HTTP 409 over REST.
 
 ## Authorization (upstream OAuth 2.1)
 
@@ -138,6 +155,8 @@ A modern client then retries with `inputResponses` and the echoed `requestState`
 
 Connect links (`/connect/<server>?t=…`) carry a signed, single-use ticket that expires after 15 minutes. GET only shows a confirmation page. POST, with an Origin check, consumes the ticket and redirects to the provider. Link previewers and prefetchers therefore can't start a flow, and a used link can't be replayed.
 
+The page's referrer policy is `same-origin`. It must not be `no-referrer`: under that policy, the Fetch spec makes browsers send `Origin: null` on the form POST, which the Origin check rightly refuses. That is how 0.1.x broke every real-browser sign-in. `same-origin` sends the real origin to the gateway, and still sends no `Referer` (which would contain the ticket) to the provider after the redirect.
+
 ## MRTR passthrough
 
 When a modern upstream returns `InputRequiredResult` (for example a form elicitation) and the downstream client is also modern, the result is passed through. Its `requestState` is prefixed with `up.` so the gateway can tell it apart from its own `gw1.` states. On retry the prefix is stripped, and `inputResponses` and `requestState` go to the upstream unchanged. The downstream client's `elicitation`, `sampling` and `roots` capabilities are forwarded on each modern request, which the stateless protocol allows. A legacy downstream client can't take part in MRTR, so it gets a tool error explaining why.
@@ -146,7 +165,7 @@ When a modern upstream returns `InputRequiredResult` (for example a form elicita
 
 - **Providers.** Subclass `Provider` and override `build_url`, `extra_headers`, `authorize_params` and `problems`. You can also set `needs_client_credentials` and `fallback_as_metadata`. Register a provider with `@register`, with `gateway.plugins`, or with a `mcpgw.providers` entry point.
 - **Token storage.** Implement `TokenStore` (`get`/`put`/`delete`) and pass it as `Gateway(cfg, store=...)`.
-- **Programmatic use.** Build the app with `server.create_app(Gateway(cfg))`, or use `Gateway.list_tools()` and `Gateway.call_tool()` directly.
+- **Programmatic use.** Build the app with `server.create_app(Gateway(cfg))`. You can also call the `Gateway` directly: `list_tools()` and `call_tool()`, `list_prompts()` and `get_prompt()`, `list_resources()`, `list_resource_templates()` and `read_resource()`.
 
 ## Security model
 
@@ -180,4 +199,11 @@ Not covered: multi-user isolation (run one gateway per user behind your own auth
 - replayed refresh tokens;
 - the wrong client authentication method.
 
-A passing test therefore shows the gateway is compliant, not just that it completes the happy path. `tests/test_gateway.py` runs real HTTP between a downstream client, the gateway and the mock. `tests/test_units.py` covers the parsers and encoders against the examples in the spec.
+A passing test therefore shows the gateway is compliant, not just that it completes the happy path. The mock also checks `Mcp-Name` on `prompts/get` and `resources/read`.
+
+| File | What it covers |
+|---|---|
+| `tests/test_gateway.py` | Real HTTP between a downstream client, the gateway and the mock |
+| `tests/test_prompts_resources.py` | Aggregation, routing and auth errors for prompts and resources |
+| `tests/test_regressions.py` | One test per fixed bug, including a headless-Chromium sign-in through the connect page (skipped without Playwright) |
+| `tests/test_units.py` | Parsers and encoders, against the examples in the spec |

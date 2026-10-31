@@ -63,6 +63,7 @@ provider = "notion"
 provider = "linear"
 readonly = true
 EOF
+mcpgw doctor                      # discovery and registration for each server, without signing in
 mcpgw -v serve                    # terminal 1
 mcpgw login notion                # terminal 2: opens the browser
 mcpgw status                      # connected, protocol, tool count
