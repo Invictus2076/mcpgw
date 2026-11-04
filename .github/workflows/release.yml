@@ -28,12 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           path: src
       - name: Check out release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: tools
       - uses: actions/setup-python@v5
@@ -113,7 +113,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mcpgw" >> "$GITHUB_OUTPUT"
